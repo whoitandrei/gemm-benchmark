@@ -7,6 +7,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <iostream>
+#include <vector>
 
 using namespace gemm;
 using namespace gemm::bench;
@@ -56,10 +58,19 @@ TEST_CASE("GEMM", "[benchmark]") {
     for (const auto& kernel : allKernels()) {
         if (!cfg.kernelSelected(kernel->name())) continue;
         const auto paramSets = expand(applyOverrides(kernel->paramSpace(), cfg.paramOverrides));
+        std::size_t skipped = 0;
         for (const auto& problem : cfg.problems) {
-            const GemmData data = makeData(problem);
+            std::vector<KernelParams> supported;
             for (const auto& params : paramSets)
-                if (kernel->supports(problem, params)) runCase(*kernel, params, problem, data);
+                if (kernel->supports(problem, params)) supported.push_back(params);
+            skipped += paramSets.size() - supported.size();
+            if (supported.empty()) continue;
+            const GemmData data = makeData(problem);
+            for (const auto& params : supported) runCase(*kernel, params, problem, data);
         }
+        if (skipped > 0)
+            std::cerr << kernel->name() << ": " << skipped << " of " << paramSets.size() * cfg.problems.size()
+                      << " combinations are not supported by the kernel and were skipped"
+                         " (check --dtype, --trans, --params)\n";
     }
 }
