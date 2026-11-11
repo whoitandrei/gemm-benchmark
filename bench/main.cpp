@@ -21,6 +21,7 @@ constexpr int64_t kVerifySamples = 1024;
 
 struct Options {
     MeasureOptions timing;
+    std::string cases{GEMM_DEFAULT_CASES};
     std::string device;
     std::set<std::string> kernels;
     std::string filter;
@@ -68,6 +69,8 @@ Options parseOptions(int argc, char** argv) {
             options.timing.warmup = toInt(arg, next());
         } else if (arg == "--rounds") {
             options.timing.rounds = toInt(arg, next());
+        } else if (arg == "--matmul-cases") {
+            options.cases = next();
         } else if (arg == "--case") {
             options.filter = next();
         } else if (arg == "--case-name") {
@@ -78,8 +81,10 @@ Options parseOptions(int argc, char** argv) {
         } else if (arg == "--list") {
             options.list = true;
         } else if (arg == "-h" || arg == "--help") {
-            std::cout << "usage: gemm_bench [--device cpu|gpu] [--kernel a,b] [--iters 20] [--warmup 5] [--rounds 5]\n"
-                         "                  [--case substring] [--case-name substring] [--report path] [--list]\n";
+            std::cout << "usage: gemm_bench [--matmul-cases file.csv] [--device cpu|gpu] [--kernel a,b]\n"
+                         "                  [--iters 20] [--warmup 5] [--rounds 5] [--case substring]\n"
+                         "                  [--case-name substring] [--report path] [--list]\n"
+                         "default cases: " GEMM_DEFAULT_CASES "\n";
             std::exit(0);
         } else {
             fail("unknown argument " + arg);
@@ -110,12 +115,20 @@ bool caseSelected(const Options& options, const Case& c) {
            c.name.find(options.caseName) != std::string::npos;
 }
 
-void list() {
+std::vector<Case> cases(const Options& options) {
+    try {
+        return loadCases(options.cases);
+    } catch (const std::exception& e) {
+        fail(e.what());
+    }
+}
+
+void list(const Options& options) {
     std::cout << "kernels:\n";
     for (const auto& k : allKernels())
         std::cout << "  " << k->name() << " (" << k->backend() << ", " << k->device() << ")\n";
-    std::cout << "cases:\n";
-    for (const auto& c : allCases()) std::cout << "  " << c.name << "  " << c.problem.toString() << '\n';
+    std::cout << "cases (" << options.cases << "):\n";
+    for (const auto& c : cases(options)) std::cout << "  " << c.name << "  " << c.problem.toString() << '\n';
 }
 
 }
@@ -123,7 +136,7 @@ void list() {
 int main(int argc, char** argv) {
     const Options options = parseOptions(argc, argv);
     if (options.list) {
-        list();
+        list(options);
         return 0;
     }
 
@@ -131,12 +144,13 @@ int main(int argc, char** argv) {
     std::cerr << "warning: built without NDEBUG (not Release), timings are not representative\n";
 #endif
 
+    const std::vector<Case> selectedCases = cases(options);
     const auto kernels = selectKernels(options);
     for (const auto& k : kernels) std::cout << "device: " << k->name() << " " << k->backend() << " " << k->device() << '\n';
 
     Report report;
     int failures = 0;
-    for (const Case& c : allCases()) {
+    for (const Case& c : selectedCases) {
         if (!caseSelected(options, c)) continue;
         std::vector<const GemmKernel*> supported;
         for (const auto& k : kernels)

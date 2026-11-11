@@ -14,6 +14,6 @@ struct Case {
 
 std::string category(const Case& c);
 
-std::vector<Case> allCases();
+std::vector<Case> loadCases(const std::string& path);
 
 }

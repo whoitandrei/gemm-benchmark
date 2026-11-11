@@ -92,6 +92,7 @@ add_executable(gemm_bench
   bench/report.cpp)
 target_link_libraries(gemm_bench PRIVATE gemm_core)
 target_compile_options(gemm_bench PRIVATE ${GEMM_WARNINGS})
+target_compile_definitions(gemm_bench PRIVATE GEMM_DEFAULT_CASES="${CMAKE_CURRENT_SOURCE_DIR}/datasets/matmul.csv")
 
 find_package(Catch2 3 QUIET)
 if(NOT Catch2_FOUND)
