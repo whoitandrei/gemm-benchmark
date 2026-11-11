@@ -93,22 +93,20 @@ add_executable(gemm_bench
 target_link_libraries(gemm_bench PRIVATE gemm_core)
 target_compile_options(gemm_bench PRIVATE ${GEMM_WARNINGS})
 
-enable_testing()
-
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gemm.cpp)
-  find_package(Catch2 3 QUIET)
-  if(NOT Catch2_FOUND)
-    FetchContent_Declare(Catch2
-      GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-      GIT_TAG        v3.16.1
-      GIT_SHALLOW    TRUE)
-    FetchContent_MakeAvailable(Catch2)
-  endif()
-  add_executable(gemm_tests tests/test_gemm.cpp)
-  target_link_libraries(gemm_tests PRIVATE gemm_core Catch2::Catch2WithMain)
-  target_compile_options(gemm_tests PRIVATE ${GEMM_WARNINGS})
-  add_test(NAME gemm_tests COMMAND gemm_tests)
+find_package(Catch2 3 QUIET)
+if(NOT Catch2_FOUND)
+  FetchContent_Declare(Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.16.1
+    GIT_SHALLOW    TRUE)
+  FetchContent_MakeAvailable(Catch2)
 endif()
+add_executable(gemm_tests tests/test_gemm.cpp)
+target_link_libraries(gemm_tests PRIVATE gemm_core Catch2::Catch2WithMain)
+target_compile_options(gemm_tests PRIVATE ${GEMM_WARNINGS})
+
+enable_testing()
+add_test(NAME gemm_tests COMMAND gemm_tests)
 
 add_test(NAME gemm_bench_smoke
   COMMAND gemm_bench --case-name matmul_attention --warmup 1 --iters 2 --rounds 3
