@@ -1,63 +1,185 @@
-#include "config.hpp"
+#include "cases.hpp"
 #include "kernel.hpp"
+#include "measure.hpp"
+#include "reference.hpp"
+#include "report.hpp"
 
-#include <catch2/catch_session.hpp>
-
+#include <cstdlib>
+#include <exception>
 #include <iostream>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace gemm;
+using namespace gemm::bench;
 
 namespace {
 
-void listKernels() {
-    for (const auto& k : gemm::allKernels()) {
-        std::cout << k->name() << " (" << k->backend() << ")";
-        for (const auto& [param, values] : k->paramSpace()) {
-            std::cout << "  " << param << '=';
-            for (std::size_t i = 0; i < values.size(); ++i) std::cout << (i ? "," : "") << values[i];
-        }
-        std::cout << '\n';
-    }
-}
+constexpr int64_t kVerifySamples = 1024;
 
-}
-
-int main(int argc, char* argv[]) {
-    Catch::Session session;
-
-    session.configData().benchmarkWarmupTime = 0;
-
-    gemm::bench::BenchOptions o;
+struct Options {
+    MeasureOptions timing;
+    std::string device;
+    std::set<std::string> kernels;
+    std::string filter;
+    std::string caseName;
+    std::string report{"results/gemm_bench_latest.csv"};
+    bool reportExplicit = false;
     bool list = false;
-    using Catch::Clara::Opt;
-    session.cli(session.cli()
-        | Opt(o.kernels, "names")["--kernel"]("GEMM: kernels, comma-separated (default: all)")
-        | Opt(o.shapes, "list")["--shapes"]("GEMM: sizes, N or MxNxK, comma-separated (default: 128,256,512)")
-        | Opt(o.batches, "list")["--batch"]("GEMM: batch sizes, comma-separated (default: 1)")
-        | Opt(o.dtypes, "list")["--dtype"]("GEMM: data types f32,i8 (default: f32,i8)")
-        | Opt(o.trans, "list")["--trans"]("GEMM: layouts nn,nt,tn,tt (default: nn)")
-        | Opt(o.broadcastB)["--broadcast-b"]("GEMM: one B matrix for the whole batch")
-        | Opt(o.params, "spec")["--params"]("GEMM: override kernel parameters, e.g. \"BM=32,64;BK=128\"")
-        | Opt(o.csv, "file")["--csv"]("GEMM: write results to a CSV file")
-        | Opt(o.verifySamples, "n")["--verify-samples"]("GEMM: elements of C checked against the reference, 0 = all (default: 1024)")
-        | Opt(o.warmupRuns, "n")["--warmup-runs"]("GEMM: minimum kernel runs before measuring (default: 3)")
-        | Opt(o.warmupMs, "ms")["--warmup-ms"]("GEMM: minimum warm-up time with kernel runs, ms (default: 200)")
-        | Opt(list)["--list-kernels"]("GEMM: list kernels and their parameters"));
 
-    if (const int rc = session.applyCommandLine(argc, argv); rc != 0) return rc;
-    if (list) {
-        listKernels();
-        return 0;
-    }
+    bool filtered() const { return !device.empty() || !kernels.empty() || !filter.empty() || !caseName.empty(); }
+};
 
+[[noreturn]] void fail(const std::string& message) {
+    std::cerr << message << std::endl;
+    std::exit(1);
+}
+
+int toInt(const std::string& name, const std::string& value) {
     try {
-        gemm::bench::benchConfig() = gemm::bench::parseConfig(o);
-    } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << '\n';
-        return 2;
+        std::size_t used = 0;
+        const int v = std::stoi(value, &used);
+        if (used == value.size()) return v;
+    } catch (const std::exception&) {
+    }
+    fail("invalid value for " + name + ": " + value);
+}
+
+Options parseOptions(int argc, char** argv) {
+    Options options;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        auto next = [&]() -> std::string {
+            if (i + 1 >= argc) fail("missing value for " + arg);
+            return argv[++i];
+        };
+        if (arg == "--device") {
+            options.device = next();
+            if (options.device != "cpu" && options.device != "gpu") fail("--device must be cpu or gpu");
+        } else if (arg == "--kernel") {
+            std::stringstream names(next());
+            for (std::string name; std::getline(names, name, ',');)
+                if (!name.empty()) options.kernels.insert(name);
+        } else if (arg == "--iters") {
+            options.timing.iterations = toInt(arg, next());
+        } else if (arg == "--warmup") {
+            options.timing.warmup = toInt(arg, next());
+        } else if (arg == "--rounds") {
+            options.timing.rounds = toInt(arg, next());
+        } else if (arg == "--case") {
+            options.filter = next();
+        } else if (arg == "--case-name") {
+            options.caseName = next();
+        } else if (arg == "--report") {
+            options.report = next();
+            options.reportExplicit = true;
+        } else if (arg == "--list") {
+            options.list = true;
+        } else if (arg == "-h" || arg == "--help") {
+            std::cout << "usage: gemm_bench [--device cpu|gpu] [--kernel a,b] [--iters 20] [--warmup 5] [--rounds 5]\n"
+                         "                  [--case substring] [--case-name substring] [--report path] [--list]\n";
+            std::exit(0);
+        } else {
+            fail("unknown argument " + arg);
+        }
+    }
+    if (options.timing.warmup < 0 || options.timing.iterations <= 0 || options.timing.rounds <= 0)
+        fail("--warmup must be >= 0, --iters and --rounds must be > 0");
+    return options;
+}
+
+std::vector<std::unique_ptr<GemmKernel>> selectKernels(const Options& options) {
+    std::vector<std::unique_ptr<GemmKernel>> selected;
+    std::set<std::string> unknown = options.kernels;
+    for (auto& kernel : allKernels()) {
+        unknown.erase(kernel->name());
+        if (!options.kernels.empty() && options.kernels.count(kernel->name()) == 0) continue;
+        const bool cpu = kernel->backend() == "cpu";
+        if (options.device == "cpu" && !cpu) continue;
+        if (options.device == "gpu" && cpu) continue;
+        selected.push_back(std::move(kernel));
+    }
+    for (const auto& name : unknown) fail("unknown kernel " + name + " (see --list)");
+    return selected;
+}
+
+bool caseSelected(const Options& options, const Case& c) {
+    return category(c).find(options.filter) != std::string::npos &&
+           c.name.find(options.caseName) != std::string::npos;
+}
+
+void list() {
+    std::cout << "kernels:\n";
+    for (const auto& k : allKernels())
+        std::cout << "  " << k->name() << " (" << k->backend() << ", " << k->device() << ")\n";
+    std::cout << "cases:\n";
+    for (const auto& c : allCases()) std::cout << "  " << c.name << "  " << c.problem.toString() << '\n';
+}
+
+}
+
+int main(int argc, char** argv) {
+    const Options options = parseOptions(argc, argv);
+    if (options.list) {
+        list();
+        return 0;
     }
 
 #ifndef NDEBUG
     std::cerr << "warning: built without NDEBUG (not Release), timings are not representative\n";
 #endif
 
-    return session.run();
+    const auto kernels = selectKernels(options);
+    for (const auto& k : kernels) std::cout << "device: " << k->name() << " " << k->backend() << " " << k->device() << '\n';
+
+    Report report;
+    int failures = 0;
+    for (const Case& c : allCases()) {
+        if (!caseSelected(options, c)) continue;
+        std::vector<const GemmKernel*> supported;
+        for (const auto& k : kernels)
+            if (k->supports(c.problem)) supported.push_back(k.get());
+        if (supported.empty()) continue;
+
+        const GemmData data = makeData(c.problem);
+        std::vector<std::byte> out(c.problem.bytesC());
+        for (const GemmKernel* k : supported) {
+            try {
+                auto instance = k->prepare(c.problem, data);
+                instance->run();
+                instance->sync();
+                instance->readC(out);
+                const VerifyResult check = verify(c.problem, data, out, kVerifySamples);
+                if (!check.ok()) {
+                    std::cerr << "FAILED case=" << c.name << " kernel=" << k->name() << " max_error=" << check.maxError
+                              << " tolerance=" << check.tolerance << '\n';
+                    ++failures;
+                    continue;
+                }
+                const Timing timing = measure(*instance, options.timing);
+                report.add({c.name, "matmul", c.problem.shape(), timing, k->name()});
+            } catch (const std::exception& e) {
+                std::cerr << "ERROR case=" << c.name << " kernel=" << k->name() << ": " << e.what() << '\n';
+                ++failures;
+            }
+        }
+    }
+
+    if (report.results().empty()) {
+        std::cerr << "no results: no selected kernel supports the selected cases\n";
+        ++failures;
+    }
+    if (options.reportExplicit || !options.filtered()) {
+        try {
+            report.writeCsv(options.report);
+        } catch (const std::exception& e) {
+            fail(e.what());
+        }
+        std::cout << "report: " << options.report << std::endl;
+    } else {
+        std::cout << "report skipped for filtered run; pass --report to write it" << std::endl;
+    }
+    return failures == 0 ? 0 : 1;
 }

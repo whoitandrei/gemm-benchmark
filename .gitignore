@@ -1,7 +1,9 @@
 build*/
 results/
 *.csv
+!scripts/peaks.csv
 *.png
 __pycache__/
 .venv/
 .DS_Store
+tests/

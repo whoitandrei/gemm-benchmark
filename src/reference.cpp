@@ -1,8 +1,11 @@
 #include "reference.hpp"
 
+#include "half.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 namespace gemm {
@@ -30,27 +33,28 @@ std::vector<Index> pickElements(const GemmProblem& p, int64_t samples) {
     return idx;
 }
 
+double value(float v) { return v; }
+double value(Half v) { return toFloat(v); }
+
 template <class TIn, class TOut>
 VerifyResult verifyTyped(const GemmProblem& p, const GemmData& in, std::span<const std::byte> c,
                          int64_t samples) {
     const auto* A = reinterpret_cast<const TIn*>(in.a.data());
     const auto* B = reinterpret_cast<const TIn*>(in.b.data());
     const auto* C = reinterpret_cast<const TOut*>(c.data());
-    const Strides sa = p.stridesA();
-    const Strides sb = p.stridesB();
 
     VerifyResult r;
     for (const Index& e : pickElements(p, samples)) {
-        const TIn* a = A + e.b * p.elemsA() + e.i * sa.row;
-        const TIn* b = B + (p.broadcastB ? 0 : e.b) * p.elemsB() + e.j * sb.col;
+        const TIn* a = A + e.b * p.elemsA() + e.i * p.K;
+        const TIn* b = B + (p.broadcastB ? 0 : e.b) * p.elemsB() + e.j;
         double ref = 0.0;
         double absSum = 0.0;
         for (int64_t k = 0; k < p.K; ++k) {
-            const double prod = static_cast<double>(a[k * sa.col]) * static_cast<double>(b[k * sb.row]);
+            const double prod = value(a[k]) * value(b[k * p.N]);
             ref += prod;
             absSum += std::abs(prod);
         }
-        const double got = static_cast<double>(C[e.b * p.elemsC() + e.i * p.N + e.j]);
+        const double got = value(C[e.b * p.elemsC() + e.i * p.N + e.j]);
         const double err = std::abs(got - ref) / std::max(absSum, 1e-30);
         r.maxError = std::max(r.maxError, err);
         ++r.checked;
@@ -63,16 +67,17 @@ VerifyResult verifyTyped(const GemmProblem& p, const GemmData& in, std::span<con
 VerifyResult verify(const GemmProblem& p, const GemmData& in, std::span<const std::byte> c,
                     int64_t samples) {
     VerifyResult r;
-    switch (p.dtype) {
-    case DType::F32:
+    if (p.dtype == DType::F32 && p.acc == DType::F32)
         r = verifyTyped<float, float>(p, in, c, samples);
-        r.tolerance = static_cast<double>(p.K + 2) * std::ldexp(1.0, -24);
-        break;
-    case DType::I8:
-        r = verifyTyped<int8_t, int32_t>(p, in, c, samples);
-        r.tolerance = 0.0;
-        break;
-    }
+    else if (p.dtype == DType::F16 && p.acc == DType::F32)
+        r = verifyTyped<Half, float>(p, in, c, samples);
+    else if (p.dtype == DType::F16 && p.acc == DType::F16)
+        r = verifyTyped<Half, Half>(p, in, c, samples);
+    else
+        throw std::invalid_argument("unsupported types " + toString(p.dtype) + "/" + toString(p.acc));
+
+    const int exponent = p.acc == DType::F16 ? -11 : -24;
+    r.tolerance = static_cast<double>(p.K + 2) * std::ldexp(1.0, exponent);
     return r;
 }
 
