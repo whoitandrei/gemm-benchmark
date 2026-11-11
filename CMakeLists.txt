@@ -108,6 +108,10 @@ target_compile_options(gemm_tests PRIVATE ${GEMM_WARNINGS})
 
 enable_testing()
 add_test(NAME gemm_tests COMMAND gemm_tests)
+if(GEMM_WITH_GGML_VULKAN)
+  add_test(NAME gemm_tests_ggml_vulkan_f16 COMMAND gemm_tests)
+  set_tests_properties(gemm_tests_ggml_vulkan_f16 PROPERTIES ENVIRONMENT GEMM_GGML_VULKAN_F16=1)
+endif()
 
 add_test(NAME gemm_bench_smoke
   COMMAND gemm_bench --case-name matmul_attention --warmup 1 --iters 2 --rounds 3

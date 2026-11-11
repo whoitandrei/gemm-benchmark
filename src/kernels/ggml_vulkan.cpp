@@ -7,6 +7,7 @@
 #include <ggml.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -15,8 +16,24 @@
 namespace gemm {
 namespace {
 
+bool f16Mode() {
+    static const bool f16 = std::getenv("GEMM_GGML_VULKAN_F16") != nullptr;
+    return f16;
+}
+
+void enableEnv(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "1");
+#else
+    setenv(name, "1", 1);
+#endif
+}
+
 ggml_backend_dev_t pickDevice() {
     static const ggml_backend_dev_t device = [] {
+        if (!f16Mode())
+            for (const char* name : {"GGML_VK_DISABLE_F16", "GGML_VK_DISABLE_COOPMAT", "GGML_VK_DISABLE_COOPMAT2"})
+                enableEnv(name);
         ggml_backend_reg_t reg = ggml_backend_vk_reg();
         if (!reg) return ggml_backend_dev_t{nullptr};
         for (enum ggml_backend_dev_type type : {GGML_BACKEND_DEVICE_TYPE_GPU, GGML_BACKEND_DEVICE_TYPE_IGPU})
@@ -70,8 +87,9 @@ private:
         ggml_init_params ip{ggml_tensor_overhead() * 4 + ggml_graph_overhead(), nullptr, true};
         ctx_ = ggml_init(ip);
         if (!ctx_) throw std::runtime_error("ggml_init failed");
-        ggml_tensor* w = ggml_new_tensor_3d(ctx_, GGML_TYPE_F16, p_.K, p_.N, p_.batchesB());
-        ggml_tensor* x = ggml_new_tensor_3d(ctx_, GGML_TYPE_F16, p_.K, p_.M, p_.batch);
+        const ggml_type type = p_.dtype == DType::F16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
+        ggml_tensor* w = ggml_new_tensor_3d(ctx_, type, p_.K, p_.N, p_.batchesB());
+        ggml_tensor* x = ggml_new_tensor_3d(ctx_, type, p_.K, p_.M, p_.batch);
         c_ = ggml_mul_mat(ctx_, w, x);
         if (p_.acc == DType::F32 && !ggml_prec_set_acc(c_, GGML_PREC_F32))
             throw std::runtime_error("ggml_prec_set_acc failed");
@@ -109,11 +127,13 @@ public:
 
     std::string device() const override {
         const ggml_backend_dev_t dev = pickDevice();
-        return dev ? ggml_backend_dev_description(dev) : "no Vulkan device";
+        if (!dev) return "no Vulkan device";
+        return std::string(ggml_backend_dev_description(dev)) +
+               (f16Mode() ? ", f16 mode" : ", f32 mode: fp16 and coopmat off");
     }
 
     bool supports(const GemmProblem& p) const override {
-        return pickDevice() && p.dtype == DType::F16;
+        return p.dtype == (f16Mode() ? DType::F16 : DType::F32) && pickDevice();
     }
 
     std::unique_ptr<GemmInstance> prepare(const GemmProblem& p, const GemmData& in) const override {
