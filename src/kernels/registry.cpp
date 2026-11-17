@@ -12,7 +12,7 @@ std::unique_ptr<GemmKernel> makeXnnpackKernel();
 std::unique_ptr<GemmKernel> makeGgmlVulkanKernel();
 #endif
 #ifdef GEMM_WITH_CUBLAS
-std::unique_ptr<GemmKernel> makeCublasKernel(int tc);
+std::vector<std::unique_ptr<GemmKernel>> makeCublasKernels();
 #endif
 
 std::vector<std::unique_ptr<GemmKernel>> allKernels() {
@@ -27,8 +27,7 @@ std::vector<std::unique_ptr<GemmKernel>> allKernels() {
     kernels.push_back(makeGgmlVulkanKernel());
 #endif
 #ifdef GEMM_WITH_CUBLAS
-    kernels.push_back(makeCublasKernel(0));
-    kernels.push_back(makeCublasKernel(1));
+    for (auto& kernel : makeCublasKernels()) kernels.push_back(std::move(kernel));
 #endif
     return kernels;
 }

@@ -11,6 +11,8 @@
 
 using namespace gemm;
 
+const Init kRandom{.kind = Init::Kind::Uniform, .low = -1.0f, .high = 1.0f};
+
 TEST_CASE("reference accepts the right product and rejects a wrong one", "[reference]") {
     const GemmProblem p{.M = 2, .K = 2, .N = 2};
     const float a[] = {1, 2, 3, 4}, b[] = {5, 6, 7, 8};
@@ -22,6 +24,8 @@ TEST_CASE("reference accepts the right product and rejects a wrong one", "[refer
     const std::span<const std::byte> view(reinterpret_cast<const std::byte*>(c), sizeof c);
     CHECK(verify(p, d, view).ok());
     c[3] = 51;
+    CHECK_FALSE(verify(p, d, view).ok());
+    c[3] = NAN;
     CHECK_FALSE(verify(p, d, view).ok());
 }
 
@@ -54,20 +58,20 @@ TEST_CASE("kernels match the reference after queued runs", "[correctness]") {
                 if (!kernel->supports(p)) continue;
                 INFO(kernel->name() << " " << p.toString());
 
-                const GemmData data = makeData(p);
+                const GemmData data = makeData(p, kRandom);
                 auto instance = kernel->prepare(p, data);
                 for (int i = 0; i < 3; ++i) instance->run();
                 instance->sync();
                 std::vector<std::byte> c(p.bytesC());
                 instance->readC(c);
-                const VerifyResult r = verify(p, data, c);
+                const VerifyResult r = verify(p, data, c, 0, kernel->inputRounding(p));
                 CHECK(r.maxError <= r.tolerance);
             }
 }
 
 TEST_CASE("only kernels with a GPU timer report gpu_ms", "[gpu-time]") {
     const GemmProblem p{.batch = 3, .M = 64, .K = 64, .N = 64};
-    const GemmData data = makeData(p);
+    const GemmData data = makeData(p, kRandom);
     for (const auto& kernel : allKernels()) {
         if (!kernel->supports(p)) continue;
         INFO(kernel->name());

@@ -94,29 +94,47 @@ private:
 const float kOneF32 = 1.0f, kZeroF32 = 0.0f;
 const Half kOneF16{0x3C00}, kZeroF16{0};
 
+constexpr double kTensorCoreRounding = 1.0 / 1024.0;
+
+enum class Variant {
+    Pedantic,
+    TensorCore,
+    Tf32,
+};
+
 struct Mode {
     DType dtype;
     DType acc;
-    int tc;
+    Variant variant;
     cudaDataType_t in;
     cudaDataType_t out;
     cublasComputeType_t compute;
     const void* one;
     const void* zero;
     int minArch;
+    double inputRounding;
 };
 
 const Mode kModes[] = {
-    {DType::F32, DType::F32, 0, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC, &kOneF32, &kZeroF32, 0},
-    {DType::F16, DType::F32, 0, CUDA_R_16F, CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC, &kOneF32, &kZeroF32, 0},
-    {DType::F16, DType::F32, 1, CUDA_R_16F, CUDA_R_32F, CUBLAS_COMPUTE_32F, &kOneF32, &kZeroF32, 0},
-    {DType::F16, DType::F16, 0, CUDA_R_16F, CUDA_R_16F, CUBLAS_COMPUTE_16F_PEDANTIC, &kOneF16, &kZeroF16, 53},
-    {DType::F16, DType::F16, 1, CUDA_R_16F, CUDA_R_16F, CUBLAS_COMPUTE_16F, &kOneF16, &kZeroF16, 53},
+    {DType::F32, DType::F32, Variant::Pedantic, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC,
+     &kOneF32, &kZeroF32, 0, 0.0},
+    {DType::F16, DType::F32, Variant::Pedantic, CUDA_R_16F, CUDA_R_32F, CUBLAS_COMPUTE_32F_PEDANTIC,
+     &kOneF32, &kZeroF32, 0, 0.0},
+    {DType::F16, DType::F16, Variant::Pedantic, CUDA_R_16F, CUDA_R_16F, CUBLAS_COMPUTE_16F_PEDANTIC,
+     &kOneF16, &kZeroF16, 53, 0.0},
+    {DType::F32, DType::F32, Variant::TensorCore, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F_FAST_16F,
+     &kOneF32, &kZeroF32, 70, kTensorCoreRounding},
+    {DType::F16, DType::F32, Variant::TensorCore, CUDA_R_16F, CUDA_R_32F, CUBLAS_COMPUTE_32F,
+     &kOneF32, &kZeroF32, 70, 0.0},
+    {DType::F16, DType::F16, Variant::TensorCore, CUDA_R_16F, CUDA_R_16F, CUBLAS_COMPUTE_16F,
+     &kOneF16, &kZeroF16, 70, 0.0},
+    {DType::F32, DType::F32, Variant::Tf32, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F_FAST_TF32,
+     &kOneF32, &kZeroF32, 80, kTensorCoreRounding},
 };
 
-const Mode* modeFor(const GemmProblem& p, int tc) {
+const Mode* modeFor(const GemmProblem& p, Variant variant) {
     for (const Mode& m : kModes)
-        if (m.dtype == p.dtype && m.acc == p.acc && m.tc == tc) return &m;
+        if (m.dtype == p.dtype && m.acc == p.acc && m.variant == variant) return &m;
     return nullptr;
 }
 
@@ -166,9 +184,19 @@ private:
 
 class CublasKernel final : public GemmKernel {
 public:
-    explicit CublasKernel(int tc) : tc_(tc) {}
+    explicit CublasKernel(Variant variant) : variant_(variant) {}
 
-    std::string name() const override { return tc_ ? "cublas_tc" : "cublas"; }
+    std::string name() const override {
+        switch (variant_) {
+            case Variant::TensorCore:
+                return "cublas_tc";
+            case Variant::Tf32:
+                return "cublas_tf32";
+            case Variant::Pedantic:
+                break;
+        }
+        return "cublas";
+    }
     std::string backend() const override { return "cuda"; }
     std::string device() const override {
         const Cuda* cuda = Cuda::get();
@@ -177,21 +205,31 @@ public:
 
     bool supports(const GemmProblem& p) const override {
         const Cuda* cuda = Cuda::get();
-        const Mode* mode = modeFor(p, tc_);
+        const Mode* mode = modeFor(p, variant_);
         if (!cuda || !mode || cuda->arch() < mode->minArch) return false;
         return p.M <= INT_MAX && p.N <= INT_MAX && p.K <= INT_MAX && p.batch <= INT_MAX;
     }
 
     std::unique_ptr<GemmInstance> prepare(const GemmProblem& p, const GemmData& in) const override {
-        return std::make_unique<CublasInstance>(*Cuda::get(), p, in, *modeFor(p, tc_));
+        return std::make_unique<CublasInstance>(*Cuda::get(), p, in, *modeFor(p, variant_));
+    }
+
+    double inputRounding(const GemmProblem& p) const override {
+        const Mode* mode = modeFor(p, variant_);
+        return mode ? mode->inputRounding : 0.0;
     }
 
 private:
-    int tc_;
+    Variant variant_;
 };
 
 }
 
-std::unique_ptr<GemmKernel> makeCublasKernel(int tc) { return std::make_unique<CublasKernel>(tc); }
+std::vector<std::unique_ptr<GemmKernel>> makeCublasKernels() {
+    std::vector<std::unique_ptr<GemmKernel>> kernels;
+    for (Variant variant : {Variant::Pedantic, Variant::TensorCore, Variant::Tf32})
+        kernels.push_back(std::make_unique<CublasKernel>(variant));
+    return kernels;
+}
 
 }

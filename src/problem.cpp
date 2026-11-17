@@ -2,8 +2,12 @@
 
 #include "half.hpp"
 
+#include <cmath>
 #include <cstring>
+#include <optional>
 #include <random>
+#include <sstream>
+#include <stdexcept>
 
 namespace gemm {
 
@@ -21,6 +25,19 @@ std::string GemmProblem::toString() const {
 
 namespace {
 
+constexpr float kConstValue = 0.01f;
+constexpr float kNormalStd = 0.02f;
+
+std::optional<float> parseFloat(const std::string& text) {
+    try {
+        std::size_t used = 0;
+        const float v = std::stof(text, &used);
+        if (used == text.size() && std::isfinite(v)) return v;
+    } catch (const std::logic_error&) {
+    }
+    return std::nullopt;
+}
+
 template <class T, class Gen>
 std::vector<std::byte> randomBytes(int64_t count, Gen next) {
     std::vector<std::byte> bytes(static_cast<std::size_t>(count) * sizeof(T));
@@ -33,17 +50,62 @@ std::vector<std::byte> randomBytes(int64_t count, Gen next) {
 
 }
 
-GemmData makeData(const GemmProblem& p, uint32_t seed) {
+std::string Init::toString() const {
+    std::ostringstream out;
+    switch (kind) {
+        case Kind::Const:
+            out << "const " << kConstValue;
+            break;
+        case Kind::Normal:
+            out << "normal mean 0 std " << kNormalStd;
+            break;
+        case Kind::Uniform:
+            out << "uniform [" << low << ", " << high << ")";
+            break;
+    }
+    return out.str();
+}
+
+Init parseInit(const std::string& text) {
+    if (text == "const") return {};
+    if (text == "normal") return {.kind = Init::Kind::Normal};
+    const std::string prefix = "uniform:";
+    if (text.starts_with(prefix)) {
+        const std::string range = text.substr(prefix.size());
+        const std::size_t comma = range.find(',');
+        if (comma != std::string::npos) {
+            const auto low = parseFloat(range.substr(0, comma));
+            const auto high = parseFloat(range.substr(comma + 1));
+            if (low && high && *low < *high && std::isfinite(*high - *low))
+                return {.kind = Init::Kind::Uniform, .low = *low, .high = *high};
+        }
+    }
+    throw std::invalid_argument("--init must be const, normal or uniform:LOW,HIGH with LOW < HIGH, got '" + text +
+                                "'");
+}
+
+GemmData makeData(const GemmProblem& p, const Init& init, uint32_t seed) {
     std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> real(-1.0f, 1.0f);
+    std::normal_distribution<float> normal(0.0f, kNormalStd);
+    std::uniform_real_distribution<float> uniform(init.low, init.high);
+    const auto next = [&] {
+        switch (init.kind) {
+            case Init::Kind::Normal:
+                return normal(rng);
+            case Init::Kind::Uniform:
+                return uniform(rng);
+            case Init::Kind::Const:
+                break;
+        }
+        return kConstValue;
+    };
     const int64_t countA = p.batch * p.elemsA();
     const int64_t countB = p.batchesB() * p.elemsB();
     if (p.dtype == DType::F16) {
-        const auto f16 = [&] { return toHalf(real(rng)); };
+        const auto f16 = [&] { return toHalf(next()); };
         return {randomBytes<Half>(countA, f16), randomBytes<Half>(countB, f16)};
     }
-    const auto f32 = [&] { return real(rng); };
-    return {randomBytes<float>(countA, f32), randomBytes<float>(countB, f32)};
+    return {randomBytes<float>(countA, next), randomBytes<float>(countB, next)};
 }
 
 std::vector<std::byte> transposedB(const GemmProblem& p, const GemmData& in) {

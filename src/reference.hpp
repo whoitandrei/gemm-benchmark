@@ -17,6 +17,6 @@ struct VerifyResult {
 };
 
 VerifyResult verify(const GemmProblem& p, const GemmData& in, std::span<const std::byte> c,
-                    int64_t samples = 0);
+                    int64_t samples = 0, double inputRounding = 0.0);
 
 }

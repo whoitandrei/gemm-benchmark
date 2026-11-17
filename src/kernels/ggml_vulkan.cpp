@@ -7,8 +7,10 @@
 #include <ggml.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,9 +18,29 @@
 namespace gemm {
 namespace {
 
+constexpr double kF16Rounding = 1.0 / 1024.0;
+
 bool f16Mode() {
     static const bool f16 = std::getenv("GEMM_GGML_VULKAN_F16") != nullptr;
     return f16;
+}
+
+std::map<std::string, std::string>& matrixCoresByDevice() {
+    static std::map<std::string, std::string> cores;
+    return cores;
+}
+
+void forwardLog(ggml_log_level, const char* text, void*) {
+    std::fputs(text, stderr);
+    const std::string line(text);
+    const std::string prefix = "ggml_vulkan: ";
+    const std::string key = " | matrix cores: ";
+    const std::size_t equals = line.find(" = ");
+    const std::size_t cores = line.find(key);
+    if (!line.starts_with(prefix) || equals == std::string::npos || cores == std::string::npos) return;
+    std::string value = line.substr(cores + key.size());
+    value.erase(value.find_last_not_of(" \r\n") + 1);
+    matrixCoresByDevice()["Vulkan" + line.substr(prefix.size(), equals - prefix.size())] = value;
 }
 
 void enableEnv(const char* name) {
@@ -34,6 +56,7 @@ ggml_backend_dev_t pickDevice() {
         if (!f16Mode())
             for (const char* name : {"GGML_VK_DISABLE_F16", "GGML_VK_DISABLE_COOPMAT", "GGML_VK_DISABLE_COOPMAT2"})
                 enableEnv(name);
+        ggml_log_set(forwardLog, nullptr);
         ggml_backend_reg_t reg = ggml_backend_vk_reg();
         if (!reg) return ggml_backend_dev_t{nullptr};
         for (enum ggml_backend_dev_type type : {GGML_BACKEND_DEVICE_TYPE_GPU, GGML_BACKEND_DEVICE_TYPE_IGPU})
@@ -120,20 +143,37 @@ private:
     ggml_tensor* c_ = nullptr;
 };
 
+std::string matrixCores() {
+    const ggml_backend_dev_t dev = pickDevice();
+    if (!dev) return "none";
+    const auto& cores = matrixCoresByDevice();
+    const auto found = cores.find(ggml_backend_dev_name(dev));
+    return found == cores.end() ? "unknown" : found->second;
+}
+
 class GgmlVulkanKernel final : public GemmKernel {
 public:
-    std::string name() const override { return "ggml_vulkan"; }
+    std::string name() const override {
+        if (!f16Mode()) return "ggml_vulkan";
+        const std::string cores = matrixCores();
+        return cores == "KHR_coopmat" || cores.starts_with("NV_coopmat2") ? "ggml_vulkan_tc" : "ggml_vulkan_f16";
+    }
+
     std::string backend() const override { return "vulkan"; }
 
     std::string device() const override {
         const ggml_backend_dev_t dev = pickDevice();
         if (!dev) return "no Vulkan device";
         return std::string(ggml_backend_dev_description(dev)) +
-               (f16Mode() ? ", f16 mode" : ", f32 mode: fp16 and coopmat off");
+               (f16Mode() ? ", f16 mode, matrix cores: " + matrixCores() : ", f32 mode: fp16 and coopmat off");
     }
 
     bool supports(const GemmProblem& p) const override {
-        return p.dtype == (f16Mode() ? DType::F16 : DType::F32) && pickDevice();
+        return (f16Mode() || p.dtype == DType::F32) && pickDevice();
+    }
+
+    double inputRounding(const GemmProblem& p) const override {
+        return f16Mode() && p.dtype == DType::F32 ? kF16Rounding : 0.0;
     }
 
     std::unique_ptr<GemmInstance> prepare(const GemmProblem& p, const GemmData& in) const override {

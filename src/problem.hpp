@@ -40,7 +40,23 @@ struct GemmData {
     std::vector<std::byte> b;
 };
 
-GemmData makeData(const GemmProblem& p, uint32_t seed = 42);
+struct Init {
+    enum class Kind {
+        Const,
+        Normal,
+        Uniform,
+    };
+
+    Kind kind = Kind::Const;
+    float low = -1.0f;
+    float high = 1.0f;
+
+    std::string toString() const;
+};
+
+Init parseInit(const std::string& text);
+
+GemmData makeData(const GemmProblem& p, const Init& init, uint32_t seed = 42);
 
 std::vector<std::byte> transposedB(const GemmProblem& p, const GemmData& in);
 

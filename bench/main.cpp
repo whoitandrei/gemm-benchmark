@@ -27,6 +27,7 @@ struct Options {
     std::string filter;
     std::string caseName;
     std::string report{"results/gemm_bench_latest.csv"};
+    Init init;
     bool reportExplicit = false;
     bool list = false;
 
@@ -78,12 +79,19 @@ Options parseOptions(int argc, char** argv) {
         } else if (arg == "--report") {
             options.report = next();
             options.reportExplicit = true;
+        } else if (arg == "--init") {
+            try {
+                options.init = parseInit(next());
+            } catch (const std::exception& e) {
+                fail(e.what());
+            }
         } else if (arg == "--list") {
             options.list = true;
         } else if (arg == "-h" || arg == "--help") {
             std::cout << "usage: gemm_bench [--matmul-cases file.csv] [--device cpu|gpu] [--kernel a,b]\n"
                          "                  [--iters 20] [--warmup 5] [--rounds 5] [--case substring]\n"
-                         "                  [--case-name substring] [--report path] [--list]\n"
+                         "                  [--case-name substring] [--init const|normal|uniform:LOW,HIGH]\n"
+                         "                  [--report path] [--list]\n"
                          "default cases: " GEMM_DEFAULT_CASES "\n";
             std::exit(0);
         } else {
@@ -147,6 +155,7 @@ int main(int argc, char** argv) {
     const std::vector<Case> selectedCases = cases(options);
     const auto kernels = selectKernels(options);
     for (const auto& k : kernels) std::cout << "device: " << k->name() << " " << k->backend() << " " << k->device() << '\n';
+    std::cout << "init: " << options.init.toString() << '\n';
 
     Report report;
     int failures = 0;
@@ -157,7 +166,7 @@ int main(int argc, char** argv) {
             if (k->supports(c.problem)) supported.push_back(k.get());
         if (supported.empty()) continue;
 
-        const GemmData data = makeData(c.problem);
+        const GemmData data = makeData(c.problem, options.init);
         std::vector<std::byte> out(c.problem.bytesC());
         for (const GemmKernel* k : supported) {
             try {
@@ -165,7 +174,8 @@ int main(int argc, char** argv) {
                 instance->run();
                 instance->sync();
                 instance->readC(out);
-                const VerifyResult check = verify(c.problem, data, out, kVerifySamples);
+                const VerifyResult check =
+                    verify(c.problem, data, out, kVerifySamples, k->inputRounding(c.problem));
                 if (!check.ok()) {
                     std::cerr << "FAILED case=" << c.name << " kernel=" << k->name() << " max_error=" << check.maxError
                               << " tolerance=" << check.tolerance << '\n';

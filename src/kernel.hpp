@@ -38,6 +38,8 @@ public:
     virtual std::string device() const = 0;
     virtual bool supports(const GemmProblem& p) const = 0;
     virtual std::unique_ptr<GemmInstance> prepare(const GemmProblem& p, const GemmData& in) const = 0;
+
+    virtual double inputRounding(const GemmProblem&) const { return 0.0; }
 };
 
 std::vector<std::unique_ptr<GemmKernel>> allKernels();

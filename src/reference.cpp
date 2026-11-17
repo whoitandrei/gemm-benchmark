@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -56,7 +57,7 @@ VerifyResult verifyTyped(const GemmProblem& p, const GemmData& in, std::span<con
         }
         const double got = value(C[e.b * p.elemsC() + e.i * p.N + e.j]);
         const double err = std::abs(got - ref) / std::max(absSum, 1e-30);
-        r.maxError = std::max(r.maxError, err);
+        r.maxError = std::isnan(err) ? std::numeric_limits<double>::infinity() : std::max(r.maxError, err);
         ++r.checked;
     }
     return r;
@@ -65,7 +66,7 @@ VerifyResult verifyTyped(const GemmProblem& p, const GemmData& in, std::span<con
 }
 
 VerifyResult verify(const GemmProblem& p, const GemmData& in, std::span<const std::byte> c,
-                    int64_t samples) {
+                    int64_t samples, double inputRounding) {
     VerifyResult r;
     if (p.dtype == DType::F32 && p.acc == DType::F32)
         r = verifyTyped<float, float>(p, in, c, samples);
@@ -77,7 +78,7 @@ VerifyResult verify(const GemmProblem& p, const GemmData& in, std::span<const st
         throw std::invalid_argument("unsupported types " + toString(p.dtype) + "/" + toString(p.acc));
 
     const int exponent = p.acc == DType::F16 ? -11 : -24;
-    r.tolerance = static_cast<double>(p.K + 2) * std::ldexp(1.0, exponent);
+    r.tolerance = static_cast<double>(p.K + 2) * std::ldexp(1.0, exponent) + 3.0 * inputRounding;
     return r;
 }
 
